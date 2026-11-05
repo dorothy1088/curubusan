@@ -1,0 +1,19 @@
+# Do not publish operational source datasets or user uploads.
+*.csv
+!templates/*.csv
+*.xlsx
+*.xls
+*.parquet
+*.pkl
+*.pickle
+*.json
+!*.ipynb
+results/
+data/
+source_data/
+uploads/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
