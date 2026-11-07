@@ -61,8 +61,8 @@ def parse_snapshot(content: bytes) -> tuple[dict, dict[str, pd.DataFrame]]:
     if not 2027 <= year <= 2200 or year <= int(cutoff[:4]):
         raise ValueError("예측 연도와 학습 종료월이 잘못되었습니다.")
     models = obj.get("models")
-    if not isinstance(models, dict) or models.get("arrivals", {}).get("name") != "ETS(A,N,A)" or models.get("passengers", {}).get("name") != "ETS(A,Ad,A)":
-        raise ValueError("예측 기록의 모델 정보가 올바르지 않습니다.")
+    if not isinstance(models, dict) or models.get("arrivals", {}).get("name") not in {"ETS(A,N,A)", "ETS(A,Ad,A)"} or models.get("passengers", {}).get("name") != "ETS(A,Ad,A)":
+        raise ValueError("예측 기록의 모델 정보가 올바르지 않습니다. 구형(A,N,A)과 신형(A,Ad,A) 기록만 지원합니다.")
     frames = {}
     for key, columns in FORECAST_COLUMNS.items():
         frame = pd.DataFrame(obj["forecast"][key])

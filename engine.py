@@ -1,11 +1,13 @@
 """부산항 크루즈 ETS 월별 갱신형 예측 엔진.
 
 원본 코드 기반:
-* 입항수: forecast.ipynb — ETS(A,N,A), direct 15개월, residual bootstrap 1,000경로
-* 승객수: 부산항_ETS_전체분석 — ETS(A,Ad,A), heuristic, scale=1000, 10,000경로
+* 입항수·승객수: ETS(A,Ad,A) 가법 오차·감쇠 가법 추세·가법 계절성
+* 두 지표 모두 heuristic 초기화, 12개월 계절주기, 다이렉트 점예측 및 10,000경로 근사 구간
+* 입항수는 건수 원단위, 승객수는 수치 안정화를 위해 천 명 단위로 학습
 
-학습 시작월은 고정하고 사용자가 확인한 실적 완료월까지 학습기간을 확장한다.
-선택 연도의 12개월만 추출하며, 입항수는 한 번 적합한 ETS 모형의 다이렉트 예측만 사용한다.
+입항수·승객수 모두 2023-01을 학습 시작월로 고정하고 확인된 완료월까지 확대한다.
+누락된 입항 월은 확인 후에만 0으로 입력한다. 선택 연도의 12개월만 표시한다.
+기존 입항수 2013년 시작 ETS(A,N,A) 기준선과 결과가 다르므로 혼용하지 않는다.
 """
 from __future__ import annotations
 
@@ -17,14 +19,14 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.exponential_smoothing.ets import ETSModel
 
-ARRIVAL_START = "2013-01"
+ARRIVAL_START = "2023-01"
 PASSENGER_START = "2023-01"
 CUTOFF = "2026-09"  # 최초 기준선 완료월; 재학습 시 cutoff 인자로 갱신
 FORECAST_START = "2027-01"
 FORECAST_END = "2027-12"
 SEED_ARRIVALS = 20261029
 SEED_PASSENGERS = 20261030
-N_ARRIVALS = 1000
+N_ARRIVALS = 10000
 N_PASSENGERS = 10000
 KNOWN_ZERO = ("2023-01", "2023-02", "2023-12", "2024-01")
 
@@ -104,16 +106,23 @@ def new_arrival_absences(rows: pd.DataFrame, cutoff: str = CUTOFF) -> list[str]:
 
 def arrival_monthly(rows: pd.DataFrame, cutoff: str = CUTOFF,
                     confirmed_recent_zeros: Iterable[str] = ()) -> tuple[pd.DataFrame, list[str]]:
+    """승객수와 동일한 2023-01~확정월 학습범위의 입항건수 월별 집계.
+
+    기록이 없는 월은 0이라고 확정되지 않았으면 학습을 중단한다.
+    파라미터 이름 confirmed_recent_zeros는 과거 호출 코드와의 호환을 위한 이름이다.
+    """
     months = month_labels(ARRIVAL_START, cutoff)
     recent = rows.loc[rows["연월"].between(ARRIVAL_START, cutoff)].copy()
-    absent_new = new_arrival_absences(recent, cutoff)
-    unapproved = [m for m in absent_new if m not in set(confirmed_recent_zeros)]
+    observed = set(recent["연월"].tolist())
+    absent = [m for m in months if m not in observed]
+    approved = set(confirmed_recent_zeros)
+    if not approved.issubset(set(months)):
+        raise ValueError("확인된 무입항 월은 공통 학습기간 내에서만 지정할 수 있습니다.")
+    unapproved = [m for m in absent if m not in approved]
     if unapproved:
-        raise ValueError("새 실적 기간의 무기록 월은 0건인지 확인이 필요합니다: " + ", ".join(unapproved))
-    # 최초 2013-2026.09 무기록 월은 기존 forecast.ipynb 집계 관례(0건)를 보존한다.
+        raise ValueError("입항 기록이 없는 학습월은 무입항(0건) 확인이 필요합니다: " + ", ".join(unapproved))
     counts = recent.groupby("연월").size().reindex(months, fill_value=0)
     result = pd.DataFrame({"연월": months, "실제입항수": counts.to_numpy(dtype=float)})
-    absent = [m for m in months if m not in set(recent["연월"])]
     if int(result["실제입항수"].sum()) != len(recent):
         raise ValueError("입항 건수 재집계 검증에 실패했습니다.")
     return result, absent
@@ -216,31 +225,48 @@ def _future_year(forecast: np.ndarray, paths: np.ndarray, label: str,
 
 
 def forecast_arrivals(monthly: pd.DataFrame, cutoff: str = CUTOFF, target_year: int = 2027) -> tuple[pd.DataFrame, dict]:
+    """입항건수도 승객수와 동일한 ETS(A,Ad,A) 모델로 적합.
+
+    날짜 순으로 연속 예측한 뒤 해당 연도만 표시한다. 중간 미래
+    관측값을 넣거나 단계마다 재적합하지 않는다(다이렉트 예측).
+    """
     y = _as_array(monthly["실제입항수"])
     if len(y) != len(month_labels(ARRIVAL_START, cutoff)):
         raise ValueError("입항수 월별 학습기간이 완전하지 않습니다.")
     h, _, _ = _check_horizon(cutoff, target_year)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        # 원본 forecast.ipynb의 ETS(A,N,A) 학습·다이렉트 예측 유지.
-        fit = ETSModel(y, error="add", trend=None, seasonal="add", seasonal_periods=12).fit(disp=False, maxiter=400)
+        fit = ETSModel(
+            y, error="add", trend="add", damped_trend=True,
+            seasonal="add", seasonal_periods=12,
+            initialization_method="heuristic",
+        ).fit(disp=False, maxiter=2000)
+    if not bool(fit.mle_retvals.get("converged", False)):
+        raise RuntimeError("입항수 ETS(A,Ad,A) 모델이 수렴하지 않았습니다. 입력 자료를 확인해주세요.")
     if not np.isfinite(fit.params).all():
-        raise RuntimeError("입항수 ETS(A,N,A) 모수 계산에 실패했습니다.")
-    fc = np.asarray(fit.forecast(h), dtype=float)
-    residuals = np.asarray(fit.resid, dtype=float)
-    residuals = residuals[np.isfinite(residuals)]
-    if not len(residuals):
-        raise ValueError("입항수 ETS 잔차가 없어 예측구간을 만들 수 없습니다.")
-    bootstrap = np.random.default_rng(SEED_ARRIVALS).choice(residuals, size=(h, N_ARRIVALS), replace=True)
-    sim = np.asarray(fit.simulate(
-        nsimulations=h, anchor="end", repetitions=N_ARRIVALS, random_errors=bootstrap
-    )).reshape(h, N_ARRIVALS)
-    result, annual_interval = _future_year(fc, sim, "입항수", cutoff, target_year)
+        raise RuntimeError("입항수 ETS(A,Ad,A) 모수 계산에 실패했습니다.")
+    # 입항수도 동일 모델의 다이렉트 점예측과 모의 경로로 구간을 산출한다.
+    fc = np.maximum(np.asarray(fit.forecast(h), dtype=float), 0)
+    try:
+        sim_values = fit.simulate(
+            h, anchor="end", repetitions=N_ARRIVALS,
+            rng=np.random.default_rng(SEED_ARRIVALS),
+        )
+    except TypeError as exc:
+        if "rng" not in str(exc):
+            raise
+        sim_values = fit.simulate(
+            h, anchor="end", repetitions=N_ARRIVALS,
+            random_state=np.random.RandomState(SEED_ARRIVALS),
+        )
+    paths = np.asarray(sim_values, dtype=float).reshape(h, N_ARRIVALS)
+    result, annual_interval = _future_year(fc, paths, "입항수", cutoff, target_year)
     meta = {
-        "model": "ETS(A,N,A)", "train_start": ARRIVAL_START,
+        "model": "ETS(A,Ad,A)", "train_start": ARRIVAL_START,
         "train_end": cutoff, "periods": len(y), "forecast_horizon_months": h,
-        "forecast_year": target_year, "simulations": N_ARRIVALS, "seed": SEED_ARRIVALS,
-        "annual_interval": annual_interval, "method": "direct",
+        "forecast_year": target_year, "simulations": N_ARRIVALS,
+        "seed": SEED_ARRIVALS, "annual_interval": annual_interval,
+        "method": "direct", "initialization": "heuristic",
     }
     return result, meta
 
