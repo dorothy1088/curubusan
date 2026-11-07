@@ -33,10 +33,11 @@ from engine import (
     forecast_arrivals, forecast_passengers, load_schedule, compare_schedule,
 )
 from history import create_snapshot, parse_snapshot, snapshot_bytes, evaluate_snapshot
+from operations import OperatingThresholds, examine_schedule, overview_metrics
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(
-    page_title="부산항 크루즈 | 갱신형 ETS 전망",
+    page_title="부산항 크루즈 | 사전 운영 지원",
     page_icon="⚓", layout="wide", initial_sidebar_state="expanded",
 )
 
@@ -155,12 +156,14 @@ hr {border-color:#e1e8ef;}
 }
 .st-key-page_arrivals_chart,
 .st-key-page_passengers_chart,
+.st-key-page_passenger_ops,
 .st-key-page_passengers_table,
 .st-key-page_arrivals_table,
 .st-key-page_workflow,
 .st-key-page_explainer,
 .st-key-page_missing_notes,
-.st-key-page_history_save, .st-key-page_history_evaluate {
+.st-key-page_history_save, .st-key-page_history_evaluate,
+.st-key-page_ops_overview, .st-key-page_ops_daily, .st-key-page_ops_detail {
   scroll-snap-align:start;
   scroll-snap-stop:normal;
   scroll-margin-top:1rem;
@@ -173,17 +176,35 @@ hr {border-color:#e1e8ef;}
 }
 .st-key-page_arrivals_chart,
 .st-key-page_passengers_chart,
+.st-key-page_passenger_ops,
 .st-key-page_passengers_table,
-.st-key-page_arrivals_table {
+.st-key-page_arrivals_table,
+.st-key-page_passenger_ops {
   min-height:calc(100dvh - 7rem);
 }
 /* 상단 소제목으로 그래프/표의 시작이 명확하도록 */
 .section-kicker{font-size:11px;font-weight:800;color:#138d9c;letter-spacing:.08em;margin-bottom:.2rem;}
 .section-caption{font-size:13px;color:#637a90;line-height:1.75;margin:0 0 .5rem;}
+/* 승객수 운영 참고사항: 2x2 카드로 구분하고 예측 그래프 다음 화면에 배치 */
+.ops-card {
+  min-height:172px;
+  height:100%;
+  border:1px solid #dce9ef;
+  border-radius:15px;
+  background:linear-gradient(145deg, #f7fbfd 0%, #ffffff 95%);
+  padding:21px 23px 20px;
+  margin-bottom:15px;
+  box-shadow:0 2px 10px rgba(20,53,81,.025);
+}
+.ops-card .ops-tag {font-family:'Manrope',sans-serif;font-size:11px;letter-spacing:.10em;font-weight:800;color:#148d9c;}
+.ops-card .ops-title {font-size:18px;font-weight:800;color:#16364e;margin:6px 0 11px;}
+.ops-card .ops-text {font-size:14px;line-height:1.85;color:#36536c;word-break:keep-all;}
+.ops-footnote {font-size:12px;line-height:1.8;color:#56738a;background:#f0f6fa;border-left:3px solid #4bb0b6;border-radius:8px;padding:12px 15px;margin-top:4px;}
 @media (max-width:900px){
  [data-testid="stSidebar"]{width:240px !important;min-width:240px !important;max-width:240px !important;flex-basis:240px !important;}
  .st-key-page_arrivals_chart,.st-key-page_passengers_chart,
- .st-key-page_passengers_table,.st-key-page_arrivals_table {min-height:auto;}
+ .st-key-page_passengers_table,.st-key-page_arrivals_table,
+ .st-key-page_passenger_ops {min-height:auto;}
 }
 @media (max-width:700px){
  .block-container{padding:1.3rem 1rem 3rem;} .hero{padding:22px 20px;}
@@ -191,13 +212,18 @@ hr {border-color:#e1e8ef;}
  .st-key-page_arrivals_chart,.st-key-page_passengers_chart,
  .st-key-page_passengers_table,.st-key-page_arrivals_table,
  .st-key-page_workflow,.st-key-page_explainer,.st-key-page_missing_notes,
-.st-key-page_history_save, .st-key-page_history_evaluate {padding:1rem;}
+ .st-key-page_passenger_ops,.st-key-page_history_save, .st-key-page_history_evaluate,
+.st-key-page_ops_overview, .st-key-page_ops_daily, .st-key-page_ops_detail {padding:1rem;}
  [data-testid="stSidebar"]{width:min(260px,85vw) !important;min-width:0 !important;max-width:85vw !important;flex-basis:min(260px,85vw) !important;}
 }
 @media (prefers-reduced-motion:reduce){
  [data-testid="stAppViewContainer"] > .main,
  [data-testid="stMain"],section.main {scroll-behavior:auto;}
 }
+/* 운영 점검 확인표: 가독성 우선, 선택 항목별 스크롤 정렬 */
+.st-key-page_ops_overview, .st-key-page_ops_daily, .st-key-page_ops_detail { scroll-snap-align:start; }
+.ops-criteria {padding:11px 14px; border-left:3px solid #0b8793; background:#eff8f9;
+ border-radius:9px; font-size:13px; color:#35546b; line-height:1.8;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -338,15 +364,44 @@ def plot_forecast(future: pd.DataFrame, observed: pd.DataFrame, value_col: str, 
     return fig
 
 
+def passenger_ops_summaries(passenger_forecast: pd.DataFrame, compare_table: pd.DataFrame):
+    """Create reader-friendly operational notes; never interpret schedule deviation as accuracy."""
+    valid = passenger_forecast.dropna(subset=["예측승객수"])
+    if valid.empty:
+        concentrated = "승객수 예측 자료가 있을 때 집중 예상 월을 확인할 수 있습니다."
+    else:
+        top = valid.nlargest(min(3, len(valid)), "예측승객수")
+        months = " · ".join(f"{int(str(month)[-2:])}월" for month in top["연월"])
+        concentrated = f"예측 승객수가 상대적으로 높은 월: {months}. 대합실과 승하선 시설의 수용 여건을 사전에 확인하세요."
+
+    scheduled = compare_table.dropna(subset=["예정 승객수", "예측승객수"]).copy()
+    scheduled = scheduled.loc[scheduled["예정 승객수"] > 0].copy()
+    if scheduled.empty:
+        deviation = ("예정 스케줄을 업로드하면 월별 예정 승객수와 ETS 예측값의 차이를 확인할 수 있습니다. "
+                     "예정 승객수는 실제 탑승객 수가 아닙니다.")
+    else:
+        scheduled["절대차이"] = (scheduled["예정 승객수"] - scheduled["예측승객수"]).abs()
+        largest = scheduled.nlargest(1, "절대차이").iloc[0]
+        deviation = (f"예정 스케줄과 예측값 차이가 가장 큰 월: {largest['연월']} "
+                     f"(약 {largest['절대차이']:,.0f}명 차이). 일정과 시설 운영 준비 계획을 추가 확인하세요.")
+
+    return (
+        ("01", "승객 집중 대비", concentrated),
+        ("02", "현장 운영 준비", "승객 집중 예상 시기의 안내·수하물 처리 인력, 대기 공간 및 이동 동선 운영계획을 검토하세요."),
+        ("03", "예정 승객수 비교", deviation),
+        ("04", "예측 불확실성", "95% 근사 예측구간을 함께 확인하고, 예측값을 실제 운영 인원이나 시설 운영계획의 확정치로 사용하지 마세요."),
+    )
+
+
 # === Header / original four-section scrolling visual language ===
 st.markdown("""
 <div class="hero">
   <div class="eyebrow">BUSAN PORT · CRUISE INTELLIGENCE</div>
-  <div class="headline">크루즈 운영 전망 · 월별 갱신형 ETS</div>
-  <div class="subtitle">새로 확정된 실적을 반영해 모델을 재학습하고, 선택한 연도의 입항수·승객수를 전망합니다.<br>
-  실제 실적과 예정 스케줄을 구분하며 월별 95% 근사 예측구간을 제시합니다.</div>
-  <span class="pill">ETS 모델 유지</span><span class="pill">최신 확정월까지 재학습</span>
-  <span class="pill">예측 연도 선택</span><span class="pill">과거 예측 기록 보관</span>
+  <div class="headline">부산항 크루즈 · 사전 운영 지원 대시보드</div>
+  <div class="subtitle">같은 ETS 감쇠 추세 계절모형으로 입항수·승객수를 전망하고, 예정 일정에 근거해<br>
+  날짜별 입항 집중과 선석 일정, 승객 안내·동선 검토사항을 연결합니다.</div>
+  <span class="pill">공통 ETS(A,Ad,A)</span><span class="pill">최신 실적 재학습</span>
+  <span class="pill">예정 일정 점검</span><span class="pill">검토표 CSV 보관</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -354,7 +409,7 @@ with st.sidebar:
     st.header("데이터 설정")
     st.caption("STEP 01 · 원자료 / 예정 스케줄")
     raw_upload = st.file_uploader("누적 입출항 원자료 CSV", type=["csv"],
-                                  help="2013년부터 최신 기록까지 하나의 누적 CSV로 업로드하세요.")
+                                  help="2023년부터 최신 기록을 포함한 누적 CSV를 업로드하세요. 이전 자료가 있어도 2023년 이후만 학습합니다.")
     schedule_upload = st.file_uploader("선택 연도 예정 스케줄 CSV (선택)", type=["csv"],
                                        help="입항예정일, 선명, 승객정원수 열. 연도를 선택하면 그해 일정만 비교합니다.")
     with st.expander("CSV 헤더 양식"):
@@ -368,7 +423,7 @@ schedule_bytes = schedule_upload.getvalue() if schedule_upload is not None else 
 if raw_bytes is None:
     one, two, three = st.columns(3, gap="medium")
     with one:
-        st.markdown('''<div class="intro-card"><div class="cap">ARRIVALS</div><div class="big">ETS(A,N,A)</div><div class="small">최초 학습: 2013.01~2026.09<br>이후 확인된 실적을 계속 추가</div></div>''', unsafe_allow_html=True)
+        st.markdown('''<div class="intro-card"><div class="cap">ARRIVALS</div><div class="big">ETS(A,Ad,A)</div><div class="small">최초 학습: 2023.01~2026.09<br>이후 확인된 실적을 계속 추가</div></div>''', unsafe_allow_html=True)
     with two:
         st.markdown('''<div class="intro-card"><div class="cap">PASSENGERS</div><div class="big">ETS(A,Ad,A)</div><div class="small">최초 학습: 2023.01~2026.09<br>승객 결측은 학습용에만 별도 보완</div></div>''', unsafe_allow_html=True)
     with three:
@@ -425,9 +480,9 @@ with st.sidebar:
     confirmed_zeros = st.multiselect(
         "무입항(0건)이 확인된 기록 없는 월", options=all_absent,
         default=[m for m in all_absent if m in KNOWN_ZERO],
-        help="승객수 학습 및 기준선 이후 입항수에는 확인된 무입항 월만 0으로 반영합니다.",
+        help="입항수·승객수 모두 2023년부터 동일한 학습기간으로 집계하며, 확인된 무입항 월만 0건·0명으로 반영합니다.",
     )
-    st.caption("2023-01·02·12, 2024-01은 이전 팀 확인 월로 초기 선택합니다. 새 무기록 월은 반드시 확인해주세요.")
+    st.caption("두 모델 모두 2023년 1월부터 학습합니다. 2023-01·02·12, 2024-01은 이전 팀 확인 월로 기본 선택하고, 그 외 무기록 월은 직접 확인해야 합니다.")
     complete_schedule = st.checkbox(
         f"{selected_year}년 예정 스케줄이 12개월 전체를 포괄합니다", value=False,
         help="체크한 경우에만 스케줄에 없는 월을 예정 0건·0명으로 해석합니다.",
@@ -454,9 +509,21 @@ if schedule_bytes:
 else:
     schedule = None
 
+with st.sidebar:
+    st.divider()
+    st.caption("STEP 05 · 운영 점검 기준 (임시 / 사용자 설정)")
+    arrivals_trigger = st.number_input("동일 날짜 입항 건수", min_value=2, max_value=20, value=2, step=1,
+                                       help="하루 입항 건수가 설정한 건수 이상이면 사전 점검 대상으로 표시합니다. 공인 위험 기준이 아닙니다.")
+    capacity_trigger = st.number_input("일별 예정 승객수 합계 (명)", min_value=100, max_value=100000,
+                                       value=8000, step=500, help="원본 승객정원수 합계 기준이며 실제 탑승객 수가 아닙니다.")
+    near_trigger = st.number_input("인접 입항 간격 (분)", min_value=15, max_value=360,
+                                   value=90, step=15, help="같은 날짜 인접 입항 간격으로, 운영 일정 검토를 위한 임의 기준입니다.")
+    st.caption("점검 기준은 실제 혼잡도·안전 위험·선석 배정 가능성을 판정하는 기준이 아닙니다.")
+operation_thresholds = OperatingThresholds(int(arrivals_trigger), int(capacity_trigger), int(near_trigger))
+
 one, two, three = st.columns(3, gap="medium")
 with one:
-    st.markdown(f'''<div class="intro-card"><div class="cap">ARRIVALS · 추세 미적용 계절모형</div><div class="big">ETS(A,N,A)</div><div class="small">학습: 2013.01 ~ {cutoff.replace('-', '.')} ({len(month_labels(ARRIVAL_START,cutoff))}개월)<br>한 번 적합한 모형의 다이렉트 예측만 사용</div></div>''', unsafe_allow_html=True)
+    st.markdown(f'''<div class="intro-card"><div class="cap">ARRIVALS · 감쇠 추세 계절모형</div><div class="big">ETS(A,Ad,A)</div><div class="small">학습: 2023.01 ~ {cutoff.replace('-', '.')} ({len(month_labels(ARRIVAL_START,cutoff))}개월)<br>한 번 적합한 모형의 다이렉트 예측만 사용</div></div>''', unsafe_allow_html=True)
 with two:
     st.markdown(f'''<div class="intro-card"><div class="cap">PASSENGERS · 감쇠 추세 계절모형</div><div class="big">ETS(A,Ad,A)</div><div class="small">학습: 2023.01 ~ {cutoff.replace('-', '.')} ({len(month_labels(PASSENGER_START,cutoff))}개월)<br>원자료 결측과 학습용 보완 구분</div></div>''', unsafe_allow_html=True)
 with three:
@@ -469,7 +536,7 @@ fingerprint = hashlib.sha256(
 ready = confirmed_complete and not unapproved
 with st.sidebar:
     st.divider()
-    st.caption("STEP 05 · 재학습 / 전망")
+    st.caption("STEP 06 · 재학습 / 전망")
     compute = st.button(f"{selected_year}년 ETS 재학습·예측 실행", type="primary",
                         use_container_width=True, disabled=not ready)
     st.caption("예측을 갱신하면 새로운 예측 기록이 만들어집니다. 이전 예측은 JSON으로 저장하세요.")
@@ -485,7 +552,9 @@ if compute:
             st.write("1/4 · 선택 완료월까지 월별 실적 집계")
             a_monthly, absent_arrival_months = arrival_monthly(rows, cutoff, confirmed_zeros)
             p_monthly, impute_log = passenger_monthly(rows, confirmed_zeros, cutoff)
-            st.write(f"2/4 · 입항수 {len(a_monthly)}개월, 승객수 {len(p_monthly)}개월 학습")
+            if a_monthly["연월"].tolist() != p_monthly["연월"].tolist():
+                raise RuntimeError("입항수와 승객수의 학습월이 일치하지 않습니다.")
+            st.write(f"2/4 · 입항수·승객수 공통 ETS(A,Ad,A) 적합 (공통 학습월: {len(a_monthly)}개월)")
             a_fc, a_meta = forecast_arrivals_cached(a_monthly, cutoff, selected_year)
             st.write("3/4 · 승객수 ETS(A,Ad,A) 학습 및 근사 예측구간")
             p_fc, p_meta = forecast_passengers_cached(p_monthly, cutoff, selected_year)
@@ -536,10 +605,109 @@ if schedule is not None:
 if result["a_meta"]["forecast_horizon_months"] > 24:
     st.warning("최종 실적 이후 24개월을 넘는 장기 예측입니다. 일정·정책·선박 변화가 반영되지 않아 불확실성이 커집니다. 가능하면 새 실적이 확정될 때마다 재학습하세요.")
 
-vtab, ttab, htab, mtab = st.tabs([
-    f"📈 {selected_year}년 예측 그래프", f"📋 {selected_year}년 비교표",
-    "🗂️ 예측 기록·실제값 평가", "🎬 시뮬레이션·방법론",
+# 운영 참고사항은 예정 스케줄의 실제 일시·선석 표기를 기준으로 생성.
+# 월별 ETS 결과를 임의로 일별로 나누지 않는다.
+operation_result = examine_schedule(schedule, selected_year, operation_thresholds)
+operation_metrics = overview_metrics(operation_result)
+
+optab, vtab, ttab, htab, mtab = st.tabs([
+    "⚓ 사전 운영 점검", f"📈 {selected_year}년 예측 그래프",
+    f"📋 {selected_year}년 비교표", "🗂️ 예측 기록·실제값 평가",
+    "🎬 시뮬레이션·방법론",
 ])
+
+with optab:
+    with st.container(key="page_ops_overview", border=False):
+        st.markdown('<div class="section-kicker">01 / OPERATIONS SUPPORT</div>', unsafe_allow_html=True)
+        st.subheader(f"{selected_year}년 크루즈 터미널 사전 운영 점검")
+        st.caption("선박 예정 스케줄을 기준으로 일별 검토 대상을 보여줍니다. ETS는 월별 전망이며, 일별 입항수나 실제 탑승객을 예측하지 않습니다.")
+        if schedule is None or operation_result["daily"].empty:
+            st.info("선택 연도의 예정 스케줄 CSV를 업로드하면 일별 입항 집중·선석 점유 시간 중첩·담당자 확인표가 나타납니다. 미업로드 상태에서는 예정 일정을 추정하지 않습니다.")
+        else:
+            m1,m2,m3,m4 = st.columns(4, gap="small")
+            m1.metric("예정 입항 건수", f"{operation_metrics['scheduled_calls']:,}건")
+            m2.metric("사전 점검 대상일", f"{operation_metrics['review_days']:,}일")
+            m3.metric("하루 최대 예정 승객수", f"{operation_metrics['max_day_capacity']:,.0f}명")
+            m4.metric("동일 선석 시간 중첩", f"{operation_metrics['overlap_pairs']:,}쌍")
+            st.markdown(
+                f'<div class="ops-criteria">현재 <b>임시 점검 기준</b>: 하루 {operation_thresholds.arrivals_per_day}척 이상 '
+                f'또는 정원 합계 {operation_thresholds.planned_capacity_per_day:,}명 이상 '
+                f'또는 인접 입항 {operation_thresholds.near_arrival_minutes}분 이내 '
+                '또는 동일 선석의 시간 겹침입니다. 사이드바에서 조정할 수 있습니다.</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("※ ‘예정 승객수’는 선박별 승객정원수 합계입니다. 실제 탑승객 수나 공식 시설 수용 한계가 아닙니다. 점검 대상은 위험 판정이 아니라 담당자 확인 후보입니다.")
+            for warning in operation_result["warnings"]:
+                st.warning(warning)
+
+    if not operation_result["daily"].empty:
+        with st.container(key="page_ops_daily", border=False):
+            st.markdown('<div class="section-kicker">02 / DAILY OPERATION REVIEW</div>', unsafe_allow_html=True)
+            st.subheader("날짜별 운영 검토표")
+            st.caption("일정 CSV로 확인된 입항일만 표시하며, 스케줄에 없는 날을 임의로 0건으로 간주하지 않습니다. 담당자·상태·메모를 수정하고 CSV로 내려받을 수 있습니다.")
+            d=operation_result["daily"]
+            month_options=sorted(d["연월"].unique().tolist())
+            sel1,sel2=st.columns([2,1],gap="small")
+            with sel1:
+                ops_month=st.selectbox("검토 월",["전체"]+month_options,key="ops_month")
+            with sel2:
+                ops_only=st.checkbox("검토 대상일만 보기",value=True,key="ops_flagged")
+            shown=d.copy()
+            if ops_month!="전체":
+                shown=shown.loc[shown["연월"].eq(ops_month)]
+            if ops_only:
+                shown=shown.loc[shown["점검 항목수"].gt(0)]
+            st.caption(f"표시 중: {len(shown)}일 / 전체 일정 기록 {len(d)}일 · 점검 기준을 바꾸면 결과가 갱신됩니다.")
+            if shown.empty:
+                st.info("현재 조건에 해당하는 예정일이 없습니다. 다른 월을 선택하거나 필터를 해제하세요.")
+            else:
+                reviewed=st.data_editor(
+                    shown.drop(columns=["연월"]).reset_index(drop=True),
+                    hide_index=True, use_container_width=True, num_rows="fixed",
+                    disabled=["일자","예정 입항수","예정 승객수","오전 입항수",
+                              "근접 입항쌍","동일 선석 중첩쌍","점검 항목수","운영 점검 사유"],
+                    column_config={"확인 상태":st.column_config.SelectboxColumn(
+                        "확인 상태",options=["미확인","확인 중","확인 완료"],required=True),
+                        "운영 메모":st.column_config.TextColumn("운영 메모",width="large")},
+                    key=f"ops_editor_{selected_year}_{ops_month}_{int(ops_only)}_{operation_thresholds}",
+                )
+                download_csv("운영 점검표 CSV 저장",reviewed,
+                             f"operations_review_{selected_year}_{ops_month}.csv",
+                             f"download_ops_{selected_year}_{ops_month}_{int(ops_only)}")
+                st.caption("편집한 확인 상태·담당자·메모는 서버에 영구 저장되지 않습니다. 다른 조건으로 이동하기 전에 CSV로 내려받아 보관하세요.")
+            month_daily=d.loc[d["연월"].eq(ops_month)] if ops_month!="전체" else d
+            bar=go.Figure(go.Bar(x=month_daily["일자"],y=month_daily["예정 승객수"],
+                                 name="예정 승객수(정원 기반)",marker_color="#62b7c5"))
+            bar.add_hline(y=operation_thresholds.planned_capacity_per_day,
+                          line_dash="dash",line_color="#c97b3e",annotation_text="설정한 검토기준")
+            bar.update_layout(height=300,margin=dict(l=10,r=20,t=20,b=30),
+                              xaxis_title="입항 예정일",yaxis_title="승객정원수 합계 (명)",
+                              paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="white")
+            st.plotly_chart(bar,use_container_width=True,key="daily_capacity_bar")
+
+        with st.container(key="page_ops_detail", border=False):
+            st.markdown('<div class="section-kicker">03 / SHIP & BERTH DETAIL</div>', unsafe_allow_html=True)
+            st.subheader("선박별 일정·현장 확인사항")
+            day_choices=operation_result["daily"].sort_values(["점검 항목수","예정 승객수"],ascending=False)["일자"].tolist()
+            chosen_day=st.selectbox("상세 확인할 입항일",day_choices,key="ops_day")
+            chosen=operation_result["daily"].set_index("일자").loc[chosen_day]
+            st.write(f"**{chosen_day}** · {int(chosen['예정 입항수'])}척 입항 예정 · 정원 합계 {chosen['예정 승객수']:,.0f}명")
+            st.caption("운영 검토 사유: "+str(chosen["운영 점검 사유"]))
+            day_vessels=operation_result["vessels"].loc[
+                operation_result["vessels"]["일자"].eq(chosen_day)]
+            st.dataframe(day_vessels.drop(columns=["일자"]),hide_index=True,use_container_width=True)
+            st.markdown("#### 담당자 확인 체크리스트")
+            for idx,label in enumerate([
+                "예정 선석과 입·출항 시간 변경 여부를 최신 일정으로 재확인",
+                "승하선 안내·대합실·수하물 처리 동선과 인력 배치 계획 검토",
+                "관광버스·택시 승하차 구역과 이동 동선 검토",
+                "관계기관(CIQ 등) 협의 및 안전·비상 대응 절차 확인",
+            ]):
+                st.checkbox(label,key=f"check_{chosen_day}_{idx}")
+            if not operation_result["overlaps"].empty:
+                with st.expander("동일 선석 표기 시간 중첩 내역 (확인 필요)"):
+                    st.dataframe(operation_result["overlaps"],hide_index=True,use_container_width=True)
+            st.caption("이 체크리스트는 업무 검토 예시입니다. 체크 결과는 현재 접속 세션에만 남으며 공식 승인·지시·안전 판정을 대체하지 않습니다.")
 
 with vtab:
     st.caption("회색 선: 확인 가능한 최근 실제 실적 · 청록 선: 선택한 연도의 ETS 예측 · 청록 음영: 95% 근사 예측구간 · 빨간 X: 승객수가 기록되지 않은 월")
@@ -562,13 +730,39 @@ with vtab:
         st.caption("빨간 X: 승객수가 누락되어 실제 월합계를 확정할 수 없는 월(0명 아님). X의 높이는 승객수 값이 아닙니다.")
         st.caption("※ 예정 승객수는 스케줄에 기재된 승객정원수의 월별 합계입니다. 실제 탑승 승객수가 아닙니다.")
 
+    # 승객수에만 적용하는 운영 참고사항: 선택 연도 전망과 예정 일정에 맞춰 갱신.
+    with st.container(key="page_passenger_ops", border=False):
+        st.markdown('<div class="section-kicker">OPERATIONS · PASSENGER FORECAST</div>', unsafe_allow_html=True)
+        st.subheader(f"{selected_year}년 승객수 예측 기반 운영 참고사항")
+        st.caption("터미널 운영사의 사전 점검을 돕는 참고사항이며, 예측값으로 운영계획을 확정하지 않습니다.")
+        ops = passenger_ops_summaries(p_forecast, p_table)
+        for pair in (ops[:2], ops[2:]):
+            left, right = st.columns(2, gap="medium")
+            for col, (number, title, description) in zip((left, right), pair):
+                with col:
+                    st.markdown(
+                        '<div class="ops-card">'
+                        f'<div class="ops-tag">CHECK {number}</div>'
+                        f'<div class="ops-title">{title}</div>'
+                        f'<div class="ops-text">{description}</div>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+        st.markdown(
+            '<div class="ops-footnote">'
+            '※ 예정 승객수는 입항 예정 선박의 승객정원수 합계로, 실제 탑승 승객수가 아닙니다. '
+            'ETS 예측은 운영 준비를 위한 참고자료이며, 예정 대비 차이율은 예측 정확도 지표가 아닙니다.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
     with st.container(key="page_arrivals_chart", border=False):
         st.markdown('<div class="section-kicker">02 / ARRIVAL FORECAST</div>', unsafe_allow_html=True)
         st.subheader(f"입항수 예측 · {selected_year}년")
-        st.caption(f"ETS(A,N,A) 추세 미적용 계절모형 | 학습: {ARRIVAL_START}~{cutoff} ({result['a_meta']['periods']}개월) | 다이렉트 예측만 사용")
+        st.caption(f"ETS(A,Ad,A) 감쇠 추세 계절모형 | 학습: {ARRIVAL_START}~{cutoff} ({result['a_meta']['periods']}개월) | 다이렉트 예측")
         st.plotly_chart(plot_forecast(
             a_forecast, result["a_monthly"], "실제입항수", "입항 (건)", cutoff,
-            selected_year, "ETS(A,N,A)", a_table["예정입항건수합계"], "입항 예정 건수",
+            selected_year, "ETS(A,Ad,A)", a_table["예정입항건수합계"], "입항 예정 건수",
         ), use_container_width=True, key="arrival_chart")
         st.caption("회색: 최근 실제 입항 기록 · 청록: 선택한 연도 예측 · 음영: 95% 근사 구간 · 주황 점선: 예정 스케줄")
 
@@ -635,20 +829,20 @@ with htab:
         baseline_file = ROOT / "reference" / "baseline_2026-09_2027.json"
         if baseline_file.is_file():
             st.download_button(
-                "최초 2027년 기준선 예측 기록 JSON",
+                "공통 학습기간(2023~) 2027년 기준선 JSON",
                 data=baseline_file.read_bytes(),
                 file_name="ets_baseline_2026-09_2027.json", mime="application/json",
                 key="baseline_snapshot_download",
             )
-            st.caption("초기 2026-09 학습자료로 복원 계산한 2027년 기준선입니다. 당시 실적값을 새로 학습한 결과로 덮어쓰지 않습니다.")
+            st.caption("입항수·승객수 모두 2023-01~2026-09로 학습한 새 2027년 기준선입니다. 기존 서로 다른 학습기간의 기록과 구분합니다.")
         st.caption("과거 예측은 다운로드한 JSON 파일을 직접 보관해주세요. 공개 Streamlit 서버에는 파일을 저장하지 않습니다.")
 
     with st.container(key="page_history_evaluate", border=False):
         st.markdown('<div class="section-kicker">06 / HISTORICAL EVALUATION</div>', unsafe_allow_html=True)
         st.subheader("이전 예측 vs 새로 확정된 실적")
         baseline_file = ROOT / "reference" / "baseline_2026-09_2027.json"
-        use_baseline = st.checkbox("최초 2027년 기준선으로 실제 실적 평가", value=False,
-                                   help="최초 2026-09 기준 학습 예측값을 변경하지 않고, 새 실적과 비교합니다.")
+        use_baseline = st.checkbox("공통 시작 기준 2027년 예측으로 실제 실적 평가", value=False,
+                                   help="2023년 공통 시작 기준의 2027년 예측값을 변경하지 않고 새 실적과 비교합니다.")
         saved_upload = st.file_uploader("저장했던 예측 기록 JSON 업로드", type=["json"], key="old_forecast_upload")
         historical_bytes = (saved_upload.getvalue() if saved_upload is not None else
                             (baseline_file.read_bytes() if use_baseline and baseline_file.is_file() else None))
@@ -688,7 +882,7 @@ with mtab:
         st.markdown('<div class="section-kicker">08 / MODEL & METRICS</div>', unsafe_allow_html=True)
         st.subheader("학습·예측 기준과 평가 지표")
         st.markdown(f"""
-        - **입항수:** ETS(A,N,A), 추세 미적용 계절모형 · 학습 **2013.01~{cutoff}** · **다이렉트 예측만**
+        - **입항수:** ETS(A,Ad,A), 감쇠 추세 계절모형 · 학습 **2023.01~{cutoff}** · **다이렉트 예측**
         - **승객수:** ETS(A,Ad,A), 감쇠 추세 계절모형 · 학습 **2023.01~{cutoff}**
         - **예측 기간:** {str(pd.Period(cutoff,freq='M')+1)}부터 {selected_year}.12까지 연속 계산, 화면에는 **{selected_year}년 1~12월**만 표시
         - **오차:** 실제−예측
@@ -701,5 +895,6 @@ with mtab:
         with st.expander("승객수 학습 자료 및 데이터 처리 내역"):
             st.dataframe(result["p_monthly"], hide_index=True, use_container_width=True)
             if result["absent_arrival_months"]:
-                st.caption(f"입항수 기록 없는 월 {len(result['absent_arrival_months'])}개 중 최초 기준선 이후의 무기록 월은 확인 후 0으로 처리했습니다. 기준선 이전의 처리 방식은 기존 노트북을 유지합니다.")
+                st.caption(f"입항수 기록 없는 학습월 {len(result['absent_arrival_months'])}개는 확인된 무입항으로 처리했습니다. 두 모델은 2023년 1월부터 같은 기간을 학습합니다.")
+        st.caption("운영 점검표의 조건은 사용자가 조정하는 참고용 기준이며, 운영 지시·선석 배정·인력 수요를 자동 결정하지 않습니다.")
         st.caption("원자료 CSV는 서버의 영구 저장소로 자동 저장하지 않습니다. 공개 클라우드에 배포한다면 파일 접근 권한과 플랫폼 데이터 정책을 별도로 확인하세요.")
