@@ -393,6 +393,17 @@ def passenger_ops_summaries(passenger_forecast: pd.DataFrame, compare_table: pd.
     )
 
 
+# The public portfolio demo must not require a visitor to supply operational CSVs.
+# Its fixtures are wholly fictional and are never mixed with uploaded records.
+with st.sidebar:
+    st.caption("PORTFOLIO EXPERIENCE")
+    portfolio_mode = st.radio(
+        "이용 방식", ("🎬 예시 데이터로 체험", "📂 직접 CSV 분석"),
+        index=0, key="portfolio_mode", help="체험 모드는 공개 가능한 가상 데이터를 사용합니다.",
+    )
+    st.divider()
+demo_mode = portfolio_mode == "🎬 예시 데이터로 체험"
+
 # === Header / original four-section scrolling visual language ===
 st.markdown("""
 <div class="hero">
@@ -405,20 +416,41 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("데이터 설정")
-    st.caption("STEP 01 · 원자료 / 예정 스케줄")
-    raw_upload = st.file_uploader("누적 입출항 원자료 CSV", type=["csv"],
-                                  help="2023년부터 최신 기록을 포함한 누적 CSV를 업로드하세요. 이전 자료가 있어도 2023년 이후만 학습합니다.")
-    schedule_upload = st.file_uploader("선택 연도 예정 스케줄 CSV (선택)", type=["csv"],
-                                       help="입항예정일, 선명, 승객정원수 열. 연도를 선택하면 그해 일정만 비교합니다.")
-    with st.expander("CSV 헤더 양식"):
-        st.download_button("원자료 헤더", file_template("raw_template.csv"), "raw_template.csv", "text/csv", key="template_raw")
-        st.download_button("예정 일정 헤더", file_template("schedule_template.csv"), "schedule_template.csv", "text/csv", key="template_schedule")
-    remove_duplicates = st.checkbox("원자료의 완전히 동일한 행 중복 제거", value=False)
+if demo_mode:
+    st.info(
+        "🧪 **포트폴리오 체험 모드 · 가상 데이터** — CSV 업로드 없이 2027년 예측과 "
+        "날짜별 운영 점검을 확인할 수 있습니다. **표시되는 모든 실적·선박·일정·예측 수치는 "
+        "실제 부산항 데이터가 아닌 시연용 예시입니다.** 실제 업무 자료로 사용하지 마세요."
+    )
+else:
+    st.caption("실제 자료 분석 모드 · 직접 업로드한 CSV로만 계산합니다.")
 
-raw_bytes = raw_upload.getvalue() if raw_upload is not None else None
-schedule_bytes = schedule_upload.getvalue() if schedule_upload is not None else None
+with st.sidebar:
+    st.header("데이터 설정" if not demo_mode else "체험용 데이터")
+    if demo_mode:
+        st.success("✅ 가상 원자료·예정 스케줄 자동 연결")
+        st.caption("학습 예시: 2023.01~2026.09 · 전망 예시: 2027년")
+        st.caption("직접 분석하려면 위의 '직접 CSV 분석'을 선택하세요. 예시 데이터는 실제 실적이 아닙니다.")
+        remove_duplicates = False
+        raw_upload = None
+        schedule_upload = None
+    else:
+        st.caption("STEP 01 · 원자료 / 예정 스케줄")
+        raw_upload = st.file_uploader("누적 입출항 원자료 CSV", type=["csv"],
+                                      help="2023년부터 최신 기록을 포함한 누적 CSV를 업로드하세요. 이전 자료가 있어도 2023년 이후만 학습합니다.")
+        schedule_upload = st.file_uploader("선택 연도 예정 스케줄 CSV (선택)", type=["csv"],
+                                           help="입항예정일, 선명, 승객정원수 열. 연도를 선택하면 그해 일정만 비교합니다.")
+        with st.expander("CSV 헤더 양식"):
+            st.download_button("원자료 헤더", file_template("raw_template.csv"), "raw_template.csv", "text/csv", key="template_raw")
+            st.download_button("예정 일정 헤더", file_template("schedule_template.csv"), "schedule_template.csv", "text/csv", key="template_schedule")
+        remove_duplicates = st.checkbox("원자료의 완전히 동일한 행 중복 제거", value=False)
+
+if demo_mode:
+    raw_bytes = (ROOT / "assets" / "demo_raw.csv").read_bytes()
+    schedule_bytes = (ROOT / "assets" / "demo_schedule.csv").read_bytes()
+else:
+    raw_bytes = raw_upload.getvalue() if raw_upload is not None else None
+    schedule_bytes = schedule_upload.getvalue() if schedule_upload is not None else None
 
 if raw_bytes is None:
     one, two, three = st.columns(3, gap="medium")
@@ -446,24 +478,29 @@ except Exception as exc:
 options = month_labels(BASE_CUTOFF, last_recorded)
 prev_to_last = str(pd.Period(last_recorded, freq="M") - 1)
 default_cutoff = max(BASE_CUTOFF, prev_to_last)
-with st.sidebar:
-    st.divider()
-    st.caption("STEP 02 · 확정된 월까지 학습")
-    cutoff = st.selectbox("실적 수집이 완료된 마지막 월", options=options,
-                          index=options.index(default_cutoff),
-                          help="마지막 기록월은 월중 자료일 수 있으므로 자동 확정하지 않습니다.")
-    confirmed_complete = st.checkbox(
-        f"{cutoff}까지 실제 입항 자료의 수집·마감을 확인했습니다",
-        value=False, key="confirmed_" + hashlib.sha256(raw_bytes).hexdigest()[:12] + cutoff,
-    )
-    st.caption(f"원자료 마지막 입항 기록: {last_recorded_date} · 마지막 기록월은 자동으로 완료월로 확정하지 않습니다.")
-    st.divider()
-    st.caption("STEP 03 · 예측 연도")
-    future_years = list(range(int(cutoff[:4]) + 1, int(cutoff[:4]) + 12))
-    selected_year = st.selectbox("예측할 연도", options=future_years,
-                                 format_func=lambda y: f"{y}년 (1~12월)",
-                                 help="마지막 확정 실적 연도의 다음 연도부터 선택 가능합니다.")
-    st.caption("현재 선택한 연도의 12개월만 그래프·비교표에 표시됩니다.")
+if demo_mode:
+    cutoff = BASE_CUTOFF
+    confirmed_complete = True  # Fixed, synthetic data through this full month.
+    selected_year = 2027
+else:
+    with st.sidebar:
+        st.divider()
+        st.caption("STEP 02 · 확정된 월까지 학습")
+        cutoff = st.selectbox("실적 수집이 완료된 마지막 월", options=options,
+                              index=options.index(default_cutoff),
+                              help="마지막 기록월은 월중 자료일 수 있으므로 자동 확정하지 않습니다.")
+        confirmed_complete = st.checkbox(
+            f"{cutoff}까지 실제 입항 자료의 수집·마감을 확인했습니다",
+            value=False, key="confirmed_" + hashlib.sha256(raw_bytes).hexdigest()[:12] + cutoff,
+        )
+        st.caption(f"원자료 마지막 입항 기록: {last_recorded_date} · 마지막 기록월은 자동으로 완료월로 확정하지 않습니다.")
+        st.divider()
+        st.caption("STEP 03 · 예측 연도")
+        future_years = list(range(int(cutoff[:4]) + 1, int(cutoff[:4]) + 12))
+        selected_year = st.selectbox("예측할 연도", options=future_years,
+                                     format_func=lambda y: f"{y}년 (1~12월)",
+                                     help="마지막 확정 실적 연도의 다음 연도부터 선택 가능합니다.")
+        st.caption("현재 선택한 연도의 12개월만 그래프·비교표에 표시됩니다.")
 
 try:
     rows, raw_info = parse_original_cached(raw_bytes, remove_duplicates, cutoff)
@@ -474,33 +511,37 @@ except Exception as exc:
 absent_passenger = missing_passenger_months(rows, cutoff)
 absent_recent_arrivals = new_arrival_absences(rows, cutoff)
 all_absent = sorted(set(absent_passenger) | set(absent_recent_arrivals))
-with st.sidebar:
-    st.divider()
-    st.caption("STEP 04 · 무입항 월 검증")
-    confirmed_zeros = st.multiselect(
-        "무입항(0건)이 확인된 기록 없는 월", options=all_absent,
-        default=[m for m in all_absent if m in KNOWN_ZERO],
-        help="입항수·승객수 모두 2023년부터 동일한 학습기간으로 집계하며, 확인된 무입항 월만 0건·0명으로 반영합니다.",
-    )
-    st.caption("두 모델 모두 2023년 1월부터 학습합니다. 2023-01·02·12, 2024-01은 이전 팀 확인 월로 기본 선택하고, 그 외 무기록 월은 직접 확인해야 합니다.")
-    complete_schedule = st.checkbox(
-        f"{selected_year}년 예정 스케줄이 12개월 전체를 포괄합니다", value=False,
-        help="체크한 경우에만 스케줄에 없는 월을 예정 0건·0명으로 해석합니다.",
-    )
+if demo_mode:
+    confirmed_zeros = [m for m in all_absent if m in KNOWN_ZERO]
+    complete_schedule = True  # Only the pre-generated fictional full-year scenario.
+else:
+    with st.sidebar:
+        st.divider()
+        st.caption("STEP 04 · 무입항 월 검증")
+        confirmed_zeros = st.multiselect(
+            "무입항(0건)이 확인된 기록 없는 월", options=all_absent,
+            default=[m for m in all_absent if m in KNOWN_ZERO],
+            help="입항수·승객수 모두 2023년부터 동일한 학습기간으로 집계하며, 확인된 무입항 월만 0건·0명으로 반영합니다.",
+        )
+        st.caption("두 모델 모두 2023년 1월부터 학습합니다. 2023-01·02·12, 2024-01은 이전 팀 확인 월로 기본 선택하고, 그 외 무기록 월은 직접 확인해야 합니다.")
+        complete_schedule = st.checkbox(
+            f"{selected_year}년 예정 스케줄이 12개월 전체를 포괄합니다", value=False,
+            help="체크한 경우에만 스케줄에 없는 월을 예정 0건·0명으로 해석합니다.",
+        )
 
 unapproved = sorted(set(all_absent) - set(confirmed_zeros))
 if unapproved:
     st.warning("아직 무입항 여부가 확인되지 않은 월: " + ", ".join(unapproved) + ". 검증 없이 임의로 0으로 바꾸지 않습니다.")
 if raw_info["ignored_after_cutoff"]:
     st.caption(f"학습기간 이후의 입항 기록 {raw_info['ignored_after_cutoff']:,}건은 아직 학습에 포함하지 않았습니다.")
-if cutoff == last_recorded:
+if not demo_mode and cutoff == last_recorded:
     st.warning("마지막 입항 기록월을 완료월로 선택했습니다. 그 달의 전체 자료가 실제로 확정되었는지 확인하세요. 마지막 입항일만으로 월 마감 여부를 알 수 없습니다.")
 
 if schedule_bytes:
     try:
         schedule = parse_schedule_cached(schedule_bytes)
         sched_year = schedule.loc[schedule["연월"].between(f"{selected_year}-01", f"{selected_year}-12")]
-        st.caption(f"{selected_year}년 예정 스케줄: {len(sched_year):,}행 · 기록 월 {sched_year['연월'].nunique()}개월")
+        st.caption(f"{selected_year}년 " + ("가상 " if demo_mode else "업로드 ") + f"예정 스케줄: {len(sched_year):,}행 · 기록 월 {sched_year['연월'].nunique()}개월")
         if sched_year.empty:
             st.warning(f"선택한 {selected_year}년의 일정이 업로드된 스케줄에 없습니다. 비교표의 예정값은 미확인으로 표시합니다.")
     except Exception as exc:
@@ -523,7 +564,7 @@ operation_thresholds = OperatingThresholds(int(arrivals_trigger), int(capacity_t
 
 one, two, three = st.columns(3, gap="medium")
 with one:
-    st.markdown(f'''<div class="intro-card"><div class="cap">ARRIVALS · 감쇠 추세 계절모형</div><div class="big">ETS(A,Ad,A)</div><div class="small">학습: 2023.01 ~ {cutoff.replace('-', '.')} ({len(month_labels(ARRIVAL_START,cutoff))}개월)<br>한 번 적합한 모형의 다이렉트 예측만 사용</div></div>''', unsafe_allow_html=True)
+    st.markdown(f'''<div class="intro-card"><div class="cap">ARRIVALS · 감쇠 추세 계절모형</div><div class="big">ETS(A,Ad,A)</div><div class="small">학습: 2023.01 ~ {cutoff.replace('-', '.')} ({len(month_labels(ARRIVAL_START,cutoff))}개월)<br>선택 연도까지 월별 예측값 산출</div></div>''', unsafe_allow_html=True)
 with two:
     st.markdown(f'''<div class="intro-card"><div class="cap">PASSENGERS · 감쇠 추세 계절모형</div><div class="big">ETS(A,Ad,A)</div><div class="small">학습: 2023.01 ~ {cutoff.replace('-', '.')} ({len(month_labels(PASSENGER_START,cutoff))}개월)<br>원자료 결측과 학습용 보완 구분</div></div>''', unsafe_allow_html=True)
 with three:
@@ -531,15 +572,22 @@ with three:
 
 fingerprint = hashlib.sha256(
     raw_bytes + (schedule_bytes or b"")
-    + str((cutoff, selected_year, sorted(confirmed_zeros), remove_duplicates, complete_schedule)).encode()
+    + str((portfolio_mode, cutoff, selected_year, sorted(confirmed_zeros), remove_duplicates, complete_schedule)).encode()
 ).hexdigest()
 ready = confirmed_complete and not unapproved
-with st.sidebar:
-    st.divider()
-    st.caption("STEP 06 · 재학습 / 전망")
-    compute = st.button(f"{selected_year}년 ETS 재학습·예측 실행", type="primary",
-                        use_container_width=True, disabled=not ready)
-    st.caption("예측을 갱신하면 새로운 예측 기록이 만들어집니다. 이전 예측은 JSON으로 저장하세요.")
+if demo_mode:
+    # Auto-compute only on first visit or changed fixture; don't retrain on every widget edit.
+    compute = (st.session_state.get("dashboard_result") is None or
+               st.session_state.get("dashboard_fingerprint") != fingerprint)
+    with st.sidebar:
+        st.caption("예측·운영 결과가 자동 표시됩니다. 점검 기준은 아래에서 변경할 수 있습니다.")
+else:
+    with st.sidebar:
+        st.divider()
+        st.caption("STEP 06 · 재학습 / 전망")
+        compute = st.button(f"{selected_year}년 ETS 재학습·예측 실행", type="primary",
+                            use_container_width=True, disabled=not ready)
+        st.caption("예측을 갱신하면 새로운 예측 기록이 만들어집니다. 이전 예측은 JSON으로 저장하세요.")
 
 if not confirmed_complete:
     st.info("왼쪽에서 확정된 실적 완료월을 확인하면 계산 버튼이 활성화됩니다.")
@@ -590,18 +638,20 @@ info = result["info"]
 known_calls = float(a_table["예정입항건수합계"].sum(min_count=1)) if schedule is not None else np.nan
 known_capacity = float(p_table["예정 승객수"].sum(min_count=1)) if schedule is not None else np.nan
 
-st.markdown(f"### {selected_year}년 핵심 전망")
+st.markdown(f"### {selected_year}년 핵심 전망" + (" · 🧪 가상 데이터 체험" if demo_mode else ""))
 k1, k2, k3, k4 = st.columns(4, gap="medium")
 with k1:
     st.metric("예측 입항수 합계", fmt_number(a_forecast["예측입항수"].sum(), "건", 2))
 with k2:
     st.metric("예측 승객수 합계", fmt_number(p_forecast["예측승객수"].sum(), "명"))
 with k3:
-    st.metric("예정 입항 건수 (업로드 일정)", fmt_number(known_calls, "건"))
+    st.metric("예정 입항 건수 (스케줄)", fmt_number(known_calls, "건"))
 with k4:
     st.metric("예정 승객수 (정원 기반)", fmt_number(known_capacity, "명"))
+if demo_mode:
+    st.caption("🧪 이 화면의 예측·실적·정원·점검 건수는 모두 가상 데이터로 계산한 예시입니다. 실제 프로젝트의 성능이나 실적을 뜻하지 않습니다.")
 if schedule is not None:
-    st.caption("※ '예정 승객수'는 업로드 스케줄의 '승객정원수' 합계로 만든 참고값입니다. 실제 탑승 승객수가 아니며 정원이 검증된 값이라는 뜻도 아닙니다.")
+    st.caption("※ '예정 승객수'는 " + ("가상 " if demo_mode else "업로드 ") + "스케줄의 '승객정원수' 합계로 만든 참고값입니다. 실제 탑승 승객수가 아니며 정원이 검증된 값이라는 뜻도 아닙니다.")
 if result["a_meta"]["forecast_horizon_months"] > 24:
     st.warning("최종 실적 이후 24개월을 넘는 장기 예측입니다. 일정·정책·선박 변화가 반영되지 않아 불확실성이 커집니다. 가능하면 새 실적이 확정될 때마다 재학습하세요.")
 
@@ -688,7 +738,7 @@ with optab:
         with st.container(key="page_ops_detail", border=False):
             st.markdown('<div class="section-kicker">03 / SHIP & BERTH DETAIL</div>', unsafe_allow_html=True)
             st.subheader("선박별 일정·현장 확인사항")
-            day_choices=operation_result["daily"].sort_values(["점검 항목수","예정 승객수"],ascending=False)["일자"].tolist()
+            day_choices = sorted(operation_result["daily"]["일자"].tolist())
             chosen_day=st.selectbox("상세 확인할 입항일",day_choices,key="ops_day")
             chosen=operation_result["daily"].set_index("일자").loc[chosen_day]
             st.write(f"**{chosen_day}** · {int(chosen['예정 입항수'])}척 입항 예정 · 정원 합계 {chosen['예정 승객수']:,.0f}명")
@@ -759,7 +809,7 @@ with vtab:
     with st.container(key="page_arrivals_chart", border=False):
         st.markdown('<div class="section-kicker">02 / ARRIVAL FORECAST</div>', unsafe_allow_html=True)
         st.subheader(f"입항수 예측 · {selected_year}년")
-        st.caption(f"ETS(A,Ad,A) 감쇠 추세 계절모형 | 학습: {ARRIVAL_START}~{cutoff} ({result['a_meta']['periods']}개월) | 다이렉트 예측")
+        st.caption(f"ETS(A,Ad,A) 감쇠 추세 계절모형 | 학습: {ARRIVAL_START}~{cutoff} ({result['a_meta']['periods']}개월)")
         st.plotly_chart(plot_forecast(
             a_forecast, result["a_monthly"], "실제입항수", "입항 (건)", cutoff,
             selected_year, "ETS(A,Ad,A)", a_table["예정입항건수합계"], "입항 예정 건수",
@@ -811,78 +861,81 @@ with ttab:
     st.info("예정 스케줄과 ETS 예측값의 차이는 **계획 대비 편차**이지, MAPE·WAPE로 평가하는 실제 예측 정확도가 아닙니다.")
 
 with htab:
-    with st.container(key="page_history_save", border=False):
-        st.markdown('<div class="section-kicker">05 / FORECAST ARCHIVE</div>', unsafe_allow_html=True)
-        st.subheader("현재 예측 기록 보관")
-        snap = result["snapshot"]
-        st.caption(
-            f"예측 생성: {snap['created_at_utc']} · 학습 완료월: {cutoff} · "
-            f"예측 대상: {selected_year}년 · 기록 ID: {snap['record_id'][:10]}"
-        )
-        json_content = snapshot_bytes(snap)
-        st.download_button(
-            "현재 예측 기록 JSON 내려받기", data=json_content,
-            file_name=f"ets_forecast_{cutoff}_{selected_year}_{snap['record_id'][:8]}.json",
-            mime="application/json", use_container_width=True, key="save_snapshot_json",
-        )
-        st.caption("JSON에는 예측값·구간·모델·시점 정보만 저장합니다. 원자료의 선박별 기록은 포함하지 않습니다. 이후 새 실적이 들어오면 이 JSON으로 당시 예측을 평가할 수 있습니다.")
-        baseline_file = ROOT / "reference" / "baseline_2026-09_2027.json"
-        if baseline_file.is_file():
-            st.download_button(
-                "공통 학습기간(2023~) 2027년 기준선 JSON",
-                data=baseline_file.read_bytes(),
-                file_name="ets_baseline_2026-09_2027.json", mime="application/json",
-                key="baseline_snapshot_download",
+    if demo_mode:
+        st.info("🧪 데모 모드는 가상 데이터이므로 예측 JSON 보관과 실제 실적 기반 정확도 평가는 제공하지 않습니다. 이 기능은 직접 CSV 분석 모드에서 사용할 수 있습니다.")
+    else:
+        with st.container(key="page_history_save", border=False):
+            st.markdown('<div class="section-kicker">05 / FORECAST ARCHIVE</div>', unsafe_allow_html=True)
+            st.subheader("현재 예측 기록 보관")
+            snap = result["snapshot"]
+            st.caption(
+                f"예측 생성: {snap['created_at_utc']} · 학습 완료월: {cutoff} · "
+                f"예측 대상: {selected_year}년 · 기록 ID: {snap['record_id'][:10]}"
             )
-            st.caption("입항수·승객수 모두 2023-01~2026-09로 학습한 새 2027년 기준선입니다. 기존 서로 다른 학습기간의 기록과 구분합니다.")
-        st.caption("과거 예측은 다운로드한 JSON 파일을 직접 보관해주세요. 공개 Streamlit 서버에는 파일을 저장하지 않습니다.")
-
-    with st.container(key="page_history_evaluate", border=False):
-        st.markdown('<div class="section-kicker">06 / HISTORICAL EVALUATION</div>', unsafe_allow_html=True)
-        st.subheader("이전 예측 vs 새로 확정된 실적")
-        baseline_file = ROOT / "reference" / "baseline_2026-09_2027.json"
-        use_baseline = st.checkbox("공통 시작 기준 2027년 예측으로 실제 실적 평가", value=False,
-                                   help="2023년 공통 시작 기준의 2027년 예측값을 변경하지 않고 새 실적과 비교합니다.")
-        saved_upload = st.file_uploader("저장했던 예측 기록 JSON 업로드", type=["json"], key="old_forecast_upload")
-        historical_bytes = (saved_upload.getvalue() if saved_upload is not None else
-                            (baseline_file.read_bytes() if use_baseline and baseline_file.is_file() else None))
-        if historical_bytes:
-            try:
-                old_meta, old_frames = parse_snapshot(historical_bytes)
-                st.caption(f"이전 예측: {old_meta['forecast_year']}년 · 당시 학습 종료: {old_meta['train_end']} · 저장 시각: {old_meta['created_at_utc']}")
-                assessed = evaluate_snapshot(
-                    old_meta, old_frames, result["a_monthly"], result["p_monthly"], cutoff,
+            json_content = snapshot_bytes(snap)
+            st.download_button(
+                "현재 예측 기록 JSON 내려받기", data=json_content,
+                file_name=f"ets_forecast_{cutoff}_{selected_year}_{snap['record_id'][:8]}.json",
+                mime="application/json", use_container_width=True, key="save_snapshot_json",
+            )
+            st.caption("JSON에는 예측값·구간·모델·시점 정보만 저장합니다. 원자료의 선박별 기록은 포함하지 않습니다. 이후 새 실적이 들어오면 이 JSON으로 당시 예측을 평가할 수 있습니다.")
+            baseline_file = ROOT / "reference" / "baseline_2026-09_2027.json"
+            if baseline_file.is_file():
+                st.download_button(
+                    "공통 학습기간(2023~) 2027년 기준선 JSON",
+                    data=baseline_file.read_bytes(),
+                    file_name="ets_baseline_2026-09_2027.json", mime="application/json",
+                    key="baseline_snapshot_download",
                 )
-                for label, key in [("입항수", "arrivals"), ("승객수", "passengers")]:
-                    frame, scores = assessed[key]
-                    st.markdown(f"#### {label} · 당시 예측의 실제 실적 검증")
-                    if scores["유효월"]:
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("MAPE", fmt_number(scores["MAPE"], "%", 2))
-                        m2.metric("WAPE", fmt_number(scores["WAPE"], "%", 2))
-                        m3.metric("95% 근사 구간 포함률", fmt_number(scores["포함률"], "%", 1))
-                        st.caption(f"실제값이 확정된 {scores['유효월']}개월만 평가. MAPE는 실제 0/결측 월 제외, WAPE는 유효월만 합산합니다.")
-                        st.dataframe(frame.round(2), hide_index=True, use_container_width=True)
-                        download_csv(f"{label} 실제 평가 CSV", frame,
-                                     f"evaluation_{key}_{old_meta['forecast_year']}.csv", "eval_"+key)
-                    else:
-                        st.info(f"{label}: 이 기록을 만든 이후 실제 실적이 확정된 예측월이 아직 없습니다. 향후 원자료를 갱신하면 평가할 수 있습니다.")
-            except Exception as exc:
-                st.error(f"이전 예측 기록을 불러오거나 평가할 수 없습니다: {exc}")
-        else:
-            st.info("과거에 저장한 예측 JSON을 선택하면, 당시 예측값을 그대로 두고 이번에 추가된 실제 완료월만 평가합니다. 과거 예측을 현재 모델로 다시 학습하지 않습니다.")
+                st.caption("입항수·승객수 모두 2023-01~2026-09로 학습한 새 2027년 기준선입니다. 기존 서로 다른 학습기간의 기록과 구분합니다.")
+            st.caption("과거 예측은 다운로드한 JSON 파일을 직접 보관해주세요. 공개 Streamlit 서버에는 파일을 저장하지 않습니다.")
+
+        with st.container(key="page_history_evaluate", border=False):
+            st.markdown('<div class="section-kicker">06 / HISTORICAL EVALUATION</div>', unsafe_allow_html=True)
+            st.subheader("이전 예측 vs 새로 확정된 실적")
+            baseline_file = ROOT / "reference" / "baseline_2026-09_2027.json"
+            use_baseline = st.checkbox("공통 시작 기준 2027년 예측으로 실제 실적 평가", value=False,
+                                       help="2023년 공통 시작 기준의 2027년 예측값을 변경하지 않고 새 실적과 비교합니다.")
+            saved_upload = st.file_uploader("저장했던 예측 기록 JSON 업로드", type=["json"], key="old_forecast_upload")
+            historical_bytes = (saved_upload.getvalue() if saved_upload is not None else
+                                (baseline_file.read_bytes() if use_baseline and baseline_file.is_file() else None))
+            if historical_bytes:
+                try:
+                    old_meta, old_frames = parse_snapshot(historical_bytes)
+                    st.caption(f"이전 예측: {old_meta['forecast_year']}년 · 당시 학습 종료: {old_meta['train_end']} · 저장 시각: {old_meta['created_at_utc']}")
+                    assessed = evaluate_snapshot(
+                        old_meta, old_frames, result["a_monthly"], result["p_monthly"], cutoff,
+                    )
+                    for label, key in [("입항수", "arrivals"), ("승객수", "passengers")]:
+                        frame, scores = assessed[key]
+                        st.markdown(f"#### {label} · 당시 예측의 실제 실적 검증")
+                        if scores["유효월"]:
+                            m1, m2, m3 = st.columns(3)
+                            m1.metric("MAPE", fmt_number(scores["MAPE"], "%", 2))
+                            m2.metric("WAPE", fmt_number(scores["WAPE"], "%", 2))
+                            m3.metric("95% 근사 구간 포함률", fmt_number(scores["포함률"], "%", 1))
+                            st.caption(f"실제값이 확정된 {scores['유효월']}개월만 평가. MAPE는 실제 0/결측 월 제외, WAPE는 유효월만 합산합니다.")
+                            st.dataframe(frame.round(2), hide_index=True, use_container_width=True)
+                            download_csv(f"{label} 실제 평가 CSV", frame,
+                                         f"evaluation_{key}_{old_meta['forecast_year']}.csv", "eval_"+key)
+                        else:
+                            st.info(f"{label}: 이 기록을 만든 이후 실제 실적이 확정된 예측월이 아직 없습니다. 향후 원자료를 갱신하면 평가할 수 있습니다.")
+                except Exception as exc:
+                    st.error(f"이전 예측 기록을 불러오거나 평가할 수 없습니다: {exc}")
+            else:
+                st.info("과거에 저장한 예측 JSON을 선택하면, 당시 예측값을 그대로 두고 이번에 추가된 실제 완료월만 평가합니다. 과거 예측을 현재 모델로 다시 학습하지 않습니다.")
 
 with mtab:
     with st.container(key="page_workflow", border=False):
         st.markdown('<div class="section-kicker">07 / HOW IT WORKS</div>', unsafe_allow_html=True)
         st.subheader("자료 업로드 → 검증 → 재학습 → 선택 연도 전망")
         show_video()
-        st.markdown("""<div class="stage">① 누적 원자료 업로드 → ② 실적 완료월 선택·확인 → ③ 무입항·승객 결측 검증 → ④ 두 ETS 모형 재학습 → ⑤ 목표 연도까지 끊김 없이 다이렉트 예측 → ⑥ 선택 연도의 12개월 추출·일정 비교 → ⑦ 예측 JSON 보관 → ⑧ 실적 확정 후 정확도 검증</div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="stage">① 누적 원자료 업로드 → ② 실적 완료월 선택·확인 → ③ 무입항·승객 결측 검증 → ④ 두 ETS 모형 재학습 → ⑤ 목표 연도까지 월별 예측 → ⑥ 선택 연도의 12개월 추출·일정 비교 → ⑦ 예측 JSON 보관 → ⑧ 실적 확정 후 정확도 검증</div>""", unsafe_allow_html=True)
     with st.container(key="page_explainer", border=False):
         st.markdown('<div class="section-kicker">08 / MODEL & METRICS</div>', unsafe_allow_html=True)
         st.subheader("학습·예측 기준과 평가 지표")
         st.markdown(f"""
-        - **입항수:** ETS(A,Ad,A), 감쇠 추세 계절모형 · 학습 **2023.01~{cutoff}** · **다이렉트 예측**
+        - **입항수:** ETS(A,Ad,A), 감쇠 추세 계절모형 · 학습 **2023.01~{cutoff}**
         - **승객수:** ETS(A,Ad,A), 감쇠 추세 계절모형 · 학습 **2023.01~{cutoff}**
         - **예측 기간:** {str(pd.Period(cutoff,freq='M')+1)}부터 {selected_year}.12까지 연속 계산, 화면에는 **{selected_year}년 1~12월**만 표시
         - **오차:** 실제−예측
